@@ -1,0 +1,7 @@
+FROM registry.fedoraproject.org/f33/python3
+
+WORKDIR /app
+COPY index.html .
+
+# Geen EXPOSE – interne container
+CMD ["python", "-m", "http.server", "8090", "--bind", "0.0.0.0"]
