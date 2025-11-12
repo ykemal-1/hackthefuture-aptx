@@ -1,0 +1,130 @@
+---
+- name: Hack The Future - Project (compact)
+  hosts: web
+  become: true
+  gather_facts: false
+
+  collections:
+    - containers.podman
+
+  tasks:
+    - name: Upgrade all packages (security)
+      dnf:
+        name: "*"
+        state: latest
+
+    - name: Ensure podman & firewalld present
+      dnf:
+        name:
+          - podman
+          - firewalld
+        state: present
+
+    - name: Start & enable firewalld
+      service:
+        name: firewalld
+        state: started
+        enabled: true
+
+    - name: Open HTTP/HTTPS
+      ansible.posix.firewalld:
+        service: "{{ item }}"
+        state: enabled
+        permanent: true
+        immediate: true
+      loop: [http, https]
+
+    - name: Create aptx user (rootless podman)
+      user:
+        name: aptx
+        create_home: yes
+        state: present
+
+    - name: Enable lingering for aptx
+      command: loginctl enable-linger aptx
+      changed_when: false
+
+    # Pull images
+    - name: Pull backend image
+      become_user: aptx
+      containers.podman.podman_image:
+        name: s148440/aptx-backend
+        state: present
+
+    - name: Pull frontend image
+      become_user: aptx
+      containers.podman.podman_image:
+        name: s148440/aptx-frontend
+        state: present
+
+    - name: Pull reverse-proxy image
+      become_user: aptx
+      containers.podman.podman_image:
+        name: s148440/aptx-reverseproxy
+        state: present
+
+    # Run containers (backend/frontend alleen lokaal; proxy publiceert)
+    - name: Run backend (bind to 127.0.0.1:8080)
+      become_user: aptx
+      containers.podman.podman_container:
+        name: aptx-backend
+        image: s148440/aptx-backend
+        state: started
+        recreate: true
+        detach: true
+        ports:
+          - "127.0.0.1:8080:8080"
+        restart_policy: always
+
+    - name: Run frontend (bind to 127.0.0.1:8081)
+      become_user: aptx
+      containers.podman.podman_container:
+        name: aptx-frontend
+        image: s148440/aptx-frontend
+        state: started
+        recreate: true
+        detach: true
+        ports:
+          - "127.0.0.1:8081:80"
+        restart_policy: always
+
+    - name: Ensure certs dir exists (host)
+      file:
+        path: /etc/letsencrypt
+        state: directory
+        mode: "0755"
+
+    - name: Run reverse-proxy (public 80/443)
+      become_user: aptx
+      containers.podman.podman_container:
+        name: aptx-reverse-proxy
+        image: s148440/aptx-reverseproxy
+        state: started
+        recreate: true
+        detach: true
+        ports:
+          - "80:80"
+          - "443:443"
+        volumes:
+          - "/etc/letsencrypt:/etc/letsencrypt:ro"
+        restart_policy: always
+
+    # Rootless systemd
+    - name: Generate systemd units (once)
+      become_user: aptx
+      args:
+        chdir: /home/aptx/.config/systemd/user
+        creates: /home/aptx/.config/systemd/user/container-aptx-reverse-proxy.service
+      shell: |
+        mkdir -p ~/.config/systemd/user
+        podman generate systemd --name --files aptx-backend
+        podman generate systemd --name --files aptx-frontend
+        podman generate systemd --name --files aptx-reverse-proxy
+
+    - name: Enable user services
+      become_user: aptx
+      shell: |
+        systemctl --user daemon-reload
+        systemctl --user enable --now container-aptx-backend.service
+        systemctl --user enable --now container-aptx-frontend.service
+        systemctl --user enable --now container-aptx-reverse-proxy.service
